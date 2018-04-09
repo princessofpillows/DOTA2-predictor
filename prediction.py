@@ -1,13 +1,13 @@
 
-import os
+import os, argparse
 import numpy as np
 
 from tqdm import tqdm
-from sklearn.linear_model import SGDClassifier, LinearRegression, LogisticRegressionCV
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.externals import joblib
 
-from utils.preprocessing import read_csv
+from utils.preprocessing import get_data, read_csv
+
 
 def process(data):
     '''
@@ -18,7 +18,7 @@ def process(data):
     Parameters
     ----------
     data: Object
-        Contains the data parsed from the openDota.csv file with pandas
+        Contains the data parsed from the OpenDota api
 
     Returns
     ----------
@@ -40,15 +40,15 @@ def process(data):
         matches_lose.setdefault(key, [])
         # group data based on outcome
         if data.iloc[row, 1] == 1.0:
-            matches_win[key].insert(0, data.iloc[row, 4])
             matches_win[key].insert(0, data.iloc[row, 3])
+            matches_win[key].insert(0, data.iloc[row, 2])
+            matches_lose[key].append(data.iloc[row, 2])
             matches_lose[key].append(data.iloc[row, 3])
-            matches_lose[key].append(data.iloc[row, 4])
         else:
-            matches_lose[key].insert(0, data.iloc[row, 4])
             matches_lose[key].insert(0, data.iloc[row, 3])
+            matches_lose[key].insert(0, data.iloc[row, 2])
+            matches_win[key].append(data.iloc[row, 2])
             matches_win[key].append(data.iloc[row, 3])
-            matches_win[key].append(data.iloc[row, 4])
 
     # loop through all matches
     for match in list(matches_win.keys()):
@@ -67,71 +67,167 @@ def process(data):
     return data, labels
 
 
-# tells pandas what data types the columns of the .csv file are
-dtypes = {
-    'match_id': int,
-    'win': bool,
-    'lane_role': float,
-    'estimate': int,
-    'score': float
-}
-print('Gathering data...' )
-# get data from csv file
-data = read_csv('data/openDota.csv', dtypes, True)
+def train(data, labels):
+    '''
+    Author: Jordan Patterson
 
-print('Processing data...')
-# process data into required shapes (N, 20) and (N, )
-data, labels = process(data)
+    Function to train models
 
-# size of train partition
-N = int(len(data) - (0.1 * len(data)))
+    Parameters
+    ----------
+    data: nparray
+        Contains the data parsed from the OpenDota api
 
-# parameters and output placeholders
-min_acc = 100
-max_acc = 0
-avg_acc = 0
-num_iterations = 1000
-best_model = RandomForestClassifier().fit(X=data[0:N, :], y=labels[0:N])
-# generates models
-print("Beginning training...")
-for i in tqdm(range(num_iterations)):
+    labels: nparray
+        Contains the labels for the parsed data
+
+    Returns
+    ----------
+    model: Object
+        The model created with the highest accuracy
+
+    '''
+
+    # size of train partition
+    N = int(len(data) - (0.1 * len(data)))
+    # parameters and output placeholders
+    min_acc = 100
+    max_acc = 0
+    avg_acc = 0
+    num_epocs = 100
+    best_model = RandomForestClassifier().fit(X=data[0:N, :], y=labels[0:N])
+    # generates models
+    print("Beginning training...")
+    for i in tqdm(range(num_epocs)):
+        # create array of random values
+        s = np.arange(data.shape[0])
+        np.random.shuffle(s)
+
+        # shuffle data
+        labels = labels[s]
+        data = data[s]
+
+        # train on model
+        model = RandomForestClassifier().fit(X=data[0:N, :], y=labels[0:N])
+
+        # create test data from data split
+        test_data = data[N:, :]
+        test_labels = labels[N:]
+
+        # get test accuracy
+        acc = model.score(test_data, test_labels) * 100
+
+        # update output
+        if acc > max_acc:
+            max_acc = acc
+            best_model = model
+        if acc < min_acc:
+            min_acc = acc
+        
+        avg_acc += acc
+
+    avg_acc /= num_epocs
+
+    print("Minimum accuracy: " + str(min_acc)[0:4] + "%")
+    print("Average accuracy: " + str(avg_acc)[0:4] + "%")
+    print("Best model accuracy: " + str(max_acc)[0:4] + "%")
+    return best_model
+
+
+def test(model, new, dtypes):
+    '''
+    Author: Jordan Patterson
+
+    Function to test live data on a pretrained model
+
+    Parameters
+    ----------
+    model: Object
+        Any scikit learn generated model
+
+    new: boolean
+        Whether we trained on new data from OpenDota or not
+
+    dtypes: dictionary
+        Key / value pair specifying type of each column/header
+
+    '''
+
+    print("Getting test data...")
+    # don't test on same data we trained on
+    if new == True:
+        data = read_csv('data/openDota.csv', dtypes, True)
+    else:
+        data = get_data(True)
+    
+    print("Processing test data...")
+    data, labels = process(data)
+
+    print("Number of complete matches: " + str(data.shape[0]))
+
     # create array of random values
     s = np.arange(data.shape[0])
     np.random.shuffle(s)
 
     # shuffle data
-    labels = labels[s]
-    data = data[s]
-
-    # train on model
-    model = RandomForestClassifier().fit(X=data[0:N, :], y=labels[0:N])
-    # model = SGDClassifier(verbose=1, max_iter=1000).fit(X=data[0:N, :], y=labels[0:N])
-    # model = LinearRegression(fit_intercept=False).fit(X=data[0:N, :], y=labels[0:N])
-    # model = LogisticRegressionCV().fit(X=data[0:N, :], y=labels[0:N])
-
-    # create test data from data split
-    test_data = data[N:, :]
-    test_labels = labels[N:]
+    test_labels = labels[s]
+    test_data = data[s]
 
     # get test accuracy
     acc = model.score(test_data, test_labels) * 100
+    print("Test accuracy: " + str(acc))
 
-    # update output
-    if acc > max_acc:
-        max_acc = acc
-        best_model = model
-    if acc < min_acc:
-        min_acc = acc
+
+def main():
+    """The main function."""
+
+    # parse command line arguments
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--new', action='store_true')
+    args = parser.parse_args()
+
+    # tells pandas what data types the columns of the .csv file are
+    dtypes = {
+        'match_id': int,
+        'win': bool,
+        'estimate': int,
+        'score': float
+    }
+
+    # use new data
+    if args.new == True:
+        print('Using new OpenDota api data')
+        print('Gathering data...' )
+        # from preprocessing.py
+        data = get_data(True)
     
-    avg_acc += acc
+    # defaults to old data
+    else:
+        print('Using openDota.csv data')
+        print('Gathering data...' )
+        # get data from csv file
+        data = read_csv('data/openDota.csv', dtypes, True)
 
-avg_acc /= num_iterations
+    print('Processing data...')
+    # process data into required shapes (N, 20) and (N, )
+    data, labels = process(data)
 
-print("Minimum accuracy: " + str(min_acc)[0:4] + "%")
-print("Average accuracy: " + str(avg_acc)[0:4] + "%")
-print("Best model accuracy: " + str(max_acc)[0:4] + "%")
+    print("Number of complete matches: " + str(data.shape[0]))
+    while data.shape[0] < 1000:
+        print("Not enough matches, trying again")
+        data = get_data(True)
+        data, labels = process(data)
 
-# path to save your model
-open('best_model.pkl', 'w')
-path = os.getcwd() + '/best_model.pkl'
-joblib.dump(best_model, path)
+    best_model = train(data, labels)
+
+    print("Beginning testing on new data...")
+    test(best_model, args.new, dtypes)
+
+    # path to save your model
+    open('best_model.pkl', 'w')
+    path = os.getcwd() + '/best_model.pkl'
+    joblib.dump(best_model, path)
+
+
+if __name__ == "__main__":
+    main()
